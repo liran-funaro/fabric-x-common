@@ -57,9 +57,11 @@ type OrdererEndpoint struct {
 	API     []string
 }
 
+// file names.
 const (
-	metaNamespaceFile = "meta-namespace-cert.pem"
-	armaDataFile      = "arma.pb.bin"
+	ConfigBlockFileName = "config-block.pb.bin"
+	metaNamespaceFile   = "meta-namespace-cert.pem"
+	armaDataFile        = "arma.pb.bin"
 )
 
 // LoadSampleConfig returns the orderer/application config combination that corresponds to
@@ -89,7 +91,7 @@ func LoadSampleConfig(profile string) (*configtxgen.Profile, error) {
 // It uses the same organizations for the orderer and the application.
 func CreateDefaultConfigBlockWithCrypto(conf ConfigBlockParameters) (*common.Block, error) {
 	if conf.BaseProfile == "" {
-		conf.BaseProfile = configtxgen.TwoOrgsSampleFabricX
+		conf.BaseProfile = configtxgen.SampleFabricX
 	}
 	if conf.ChannelID == "" {
 		conf.ChannelID = "chan"
@@ -157,7 +159,7 @@ func CreateDefaultConfigBlockWithCrypto(conf ConfigBlockParameters) (*common.Blo
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to get output block")
 	}
-	err = configtxgen.WriteOutputBlock(block, path.Join(conf.TargetPath, "config-block.pb.bin"))
+	err = configtxgen.WriteOutputBlock(block, path.Join(conf.TargetPath, ConfigBlockFileName))
 	return block, errors.Wrap(err, "failed to write block")
 }
 

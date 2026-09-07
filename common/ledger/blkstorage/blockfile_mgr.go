@@ -473,7 +473,7 @@ func (mgr *blockfileMgr) syncIndex() error {
 		if blockBytes == nil {
 			break
 		}
-		info, err := extractSerializedBlockInfo(blockBytes)
+		info, err := extractSerializedBlockInfo(blockBytes, mgr.index.serializationNeeds())
 		if err != nil {
 			return err
 		}
@@ -601,7 +601,7 @@ func (mgr *blockfileMgr) retrieveBlockHeaderByNumber(blockNum uint64) (*common.B
 	if err != nil {
 		return nil, err
 	}
-	info, err := extractSerializedBlockInfo(blockBytes)
+	info, err := extractSerializedBlockInfo(blockBytes, noIndexNeeds)
 	if err != nil {
 		return nil, err
 	}

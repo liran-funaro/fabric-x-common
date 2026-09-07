@@ -134,7 +134,7 @@ func (r *rollbackMgr) deleteIndexEntriesRange(startBlkNum, endBlkNum uint64) err
 		if err != nil {
 			return err
 		}
-		blockInfo, err := extractSerializedBlockInfo(blockBytes)
+		blockInfo, err := extractSerializedBlockInfo(blockBytes, r.indexStore.serializationNeeds())
 		if err != nil {
 			return err
 		}
@@ -219,7 +219,7 @@ func calculateEndOffSet(ledgerDir string, targetBlkFileNum int, blockNum uint64)
 		if err != nil {
 			return 0, err
 		}
-		blockInfo, err := extractSerializedBlockInfo(blockBytes)
+		blockInfo, err := extractSerializedBlockInfo(blockBytes, noIndexNeeds)
 		if err != nil {
 			return 0, err
 		}

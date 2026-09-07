@@ -89,7 +89,7 @@ func TestSerializedBlockInfo(t *testing.T) {
 
 func testSerializedBlockInfo(t *testing.T, block *common.Block, c *testutilTxIDComputator) {
 	bb, info := serializeBlock(block, allIndexNeeds)
-	infoFromBB, err := extractSerializedBlockInfo(bb)
+	infoFromBB, err := extractSerializedBlockInfo(bb, allIndexNeeds)
 	require.NoError(t, err)
 	require.Equal(t, info, infoFromBB)
 	require.Equal(t, len(block.Data.Data), len(info.txOffsets))
@@ -129,6 +129,18 @@ func (c *testutilTxIDComputator) reset() {
 	c.malformedTxNums = map[int]struct{}{}
 }
 
+// namedIndexNeeds is every index configuration a store can be in, as serializeBlock and
+// extractData see it: the txID index needs both, the blockNum-tranNum index the offsets alone,
+// and a block-number-only store -- a committer sidecar with the txID index disabled -- neither.
+var namedIndexNeeds = []struct {
+	name  string
+	needs indexNeeds
+}{
+	{"allIndexes", allIndexNeeds},
+	{"offsetsOnly", indexNeeds{txOffsets: true}},
+	{"noIndex", noIndexNeeds},
+}
+
 // TestSerializeBlockIndexNeeds pins the two things a caller relies on when it asks for less
 // than everything: the bytes on disk do not change, and what it did not ask for is absent.
 func TestSerializeBlockIndexNeeds(t *testing.T) {
@@ -162,7 +174,7 @@ func TestSerializeBlockIndexNeeds(t *testing.T) {
 		for _, needs := range []indexNeeds{allIndexNeeds, {txOffsets: true}, {}} {
 			bb, info := serializeBlock(empty, needs)
 			require.Nil(t, info.txOffsets)
-			infoFromBB, err := extractSerializedBlockInfo(bb)
+			infoFromBB, err := extractSerializedBlockInfo(bb, needs)
 			require.NoError(t, err)
 			require.Equal(t, info, infoFromBB)
 		}
@@ -177,6 +189,45 @@ func TestSerializeBlockIndexNeeds(t *testing.T) {
 			require.Equal(t, block, deserialized)
 		}
 	})
+}
+
+// TestExtractSerializedBlockInfoIndexNeeds is the read-side counterpart of
+// TestSerializeBlockIndexNeeds: reading a block back with the same needs it was written with
+// yields the same info, whatever those needs are. Since the write side is pinned above, equality
+// against it is also what proves the read side omitted whatever was not asked for. This is the
+// invariant syncIndex relies on -- it rebuilds the index from the file and must land on the
+// offsets the original append computed.
+func TestExtractSerializedBlockInfoIndexNeeds(t *testing.T) {
+	t.Parallel()
+
+	malformed := testutil.ConstructTestBlock(t, 1, 10, 100)
+	malformed.Data.Data[1] = protoutil.MarshalOrPanic(&common.Envelope{
+		Payload: []byte("Malformed Payload"),
+	})
+
+	for _, tc := range []struct {
+		name  string
+		block *common.Block
+	}{
+		{"full block", testutil.ConstructTestBlock(t, 1, 10, 100)},
+		{"malformed envelope", malformed},
+		{"no transactions", testutil.ConstructTestBlock(t, 1, 0, 0)},
+	} {
+		for _, needs := range namedIndexNeeds {
+			t.Run(tc.name+"/"+needs.name, func(t *testing.T) {
+				t.Parallel()
+				bb, info := serializeBlock(tc.block, needs.needs)
+				infoFromBB, err := extractSerializedBlockInfo(bb, needs.needs)
+				require.NoError(t, err)
+				require.Equal(t, info, infoFromBB)
+
+				// Whatever was asked for, the block itself reads back whole.
+				deserialized, err := deserializeBlock(bb)
+				require.NoError(t, err)
+				require.Equal(t, tc.block, deserialized)
+			})
+		}
+	}
 }
 
 // TestBlockIndexSerializationNeeds checks that the index asks for exactly what indexBlock
@@ -242,14 +293,7 @@ func TestSerializedBlockSizeIsExact(t *testing.T) {
 func BenchmarkSerializeBlock(b *testing.B) {
 	for _, size := range []struct{ numTx, txSize int }{{10, 100}, {500, 300}, {10000, 300}} {
 		block := constructBenchmarkBlocks(b, 2, size.numTx, size.txSize)[1]
-		for _, tc := range []struct {
-			name  string
-			needs indexNeeds
-		}{
-			{"allIndexes", allIndexNeeds},
-			{"offsetsOnly", indexNeeds{txOffsets: true}},
-			{"noIndex", indexNeeds{}},
-		} {
+		for _, tc := range namedIndexNeeds {
 			b.Run(fmt.Sprintf("numTx=%d/txSize=%d/%s", size.numTx, size.txSize, tc.name), func(b *testing.B) {
 				b.ReportAllocs()
 				for b.Loop() {
@@ -267,5 +311,44 @@ func BenchmarkSerializedBlockSize(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		serializedBlockSize(block)
+	}
+}
+
+// BenchmarkDeserializeBlock measures the read path, which serves every block the store hands
+// out. It asks for no index information at all -- deserializeBlock discards the offsets -- so
+// this is the whole cost of turning bytes back into a block.
+func BenchmarkDeserializeBlock(b *testing.B) {
+	for _, size := range []struct{ numTx, txSize int }{{10, 100}, {500, 300}, {10000, 300}} {
+		block := constructBenchmarkBlocks(b, 2, size.numTx, size.txSize)[1]
+		bb, _ := serializeBlock(block, noIndexNeeds)
+		b.Run(fmt.Sprintf("numTx=%d/txSize=%d", size.numTx, size.txSize), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := deserializeBlock(bb); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+// BenchmarkExtractSerializedBlockInfo measures reading a block back for its index information,
+// which is what syncIndex does per block when it rebuilds the index, and rollback does per block
+// it unwinds. The needs are the store's index configuration, so the spread across the three cases
+// is what a store saves by not maintaining an index it does not query.
+func BenchmarkExtractSerializedBlockInfo(b *testing.B) {
+	for _, size := range []struct{ numTx, txSize int }{{500, 300}, {10000, 300}} {
+		block := constructBenchmarkBlocks(b, 2, size.numTx, size.txSize)[1]
+		bb, _ := serializeBlock(block, noIndexNeeds)
+		for _, tc := range namedIndexNeeds {
+			b.Run(fmt.Sprintf("numTx=%d/txSize=%d/%s", size.numTx, size.txSize, tc.name), func(b *testing.B) {
+				b.ReportAllocs()
+				for b.Loop() {
+					if _, err := extractSerializedBlockInfo(bb, tc.needs); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+		}
 	}
 }

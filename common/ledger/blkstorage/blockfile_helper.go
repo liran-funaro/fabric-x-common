@@ -124,7 +124,7 @@ func retrieveFirstBlockNumFromFile(rootDir string, fileNum int) (uint64, error) 
 	if err != nil {
 		return 0, err
 	}
-	blockInfo, err := extractSerializedBlockInfo(bb)
+	blockInfo, err := extractSerializedBlockInfo(bb, noIndexNeeds)
 	if err != nil {
 		return 0, err
 	}

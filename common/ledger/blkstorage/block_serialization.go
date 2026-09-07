@@ -41,6 +41,10 @@ type indexNeeds struct {
 // consult, which is what the block store's own tests and the read-back paths want.
 var allIndexNeeds = indexNeeds{txOffsets: true, txIDs: true}
 
+// noIndexNeeds asks for nothing beyond the block itself. For the read paths that want the
+// block, or a field of its header, and never look at the offsets.
+var noIndexNeeds = indexNeeds{}
+
 func serializeBlock(block *common.Block, needs indexNeeds) ([]byte, *serializedBlockInfo) {
 	buf := make([]byte, 0, serializedBlockSize(block))
 	buf = appendHeaderBytes(buf, block.Header)
@@ -70,7 +74,9 @@ func deserializeBlock(serializedBlockBytes []byte) (*common.Block, error) {
 	if block.Header, err = extractHeader(b); err != nil {
 		return nil, err
 	}
-	if block.Data, _, err = extractData(b); err != nil {
+	// The offsets are discarded below, so do not pay to build them -- and above all do not pay
+	// the per transaction txID unmarshal that filling them in would require.
+	if block.Data, _, err = extractData(b, noIndexNeeds); err != nil {
 		return nil, err
 	}
 	if block.Metadata, err = extractMetadata(b); err != nil {
@@ -79,7 +85,10 @@ func deserializeBlock(serializedBlockBytes []byte) (*common.Block, error) {
 	return block, nil
 }
 
-func extractSerializedBlockInfo(serializedBlockBytes []byte) (*serializedBlockInfo, error) {
+// extractSerializedBlockInfo reads a block back the way serializeBlock wrote it. needs has the
+// same meaning on the way in as on the way out: whatever the caller does not ask for is not
+// produced, and the txIDs in particular cost an envelope unmarshal each.
+func extractSerializedBlockInfo(serializedBlockBytes []byte, needs indexNeeds) (*serializedBlockInfo, error) {
 	info := &serializedBlockInfo{}
 	var err error
 	b := newBuffer(serializedBlockBytes)
@@ -87,7 +96,7 @@ func extractSerializedBlockInfo(serializedBlockBytes []byte) (*serializedBlockIn
 	if err != nil {
 		return nil, err
 	}
-	_, info.txOffsets, err = extractData(b)
+	_, info.txOffsets, err = extractData(b, needs)
 	if err != nil {
 		return nil, err
 	}
@@ -194,7 +203,10 @@ func extractHeader(buf *buffer) (*common.BlockHeader, error) {
 	return header, nil
 }
 
-func extractData(buf *buffer) (*common.BlockData, []*txindexInfo, error) {
+// extractData decodes the block's transaction envelopes, and locates them within
+// serializedBlockBytes only if needs asks for it. The offsets mirror what constructTxIndexInfo
+// computes on the way in, here read off the decoder's position rather than recomputed.
+func extractData(buf *buffer, needs indexNeeds) (*common.BlockData, []*txindexInfo, error) {
 	data := &common.BlockData{}
 	var txOffsets []*txindexInfo
 	var numItems uint64
@@ -203,20 +215,29 @@ func extractData(buf *buffer) (*common.BlockData, []*txindexInfo, error) {
 	if numItems, err = buf.DecodeVarint(); err != nil {
 		return nil, nil, errors.Wrap(err, "error decoding the length of block data")
 	}
-	for i := uint64(0); i < numItems; i++ {
-		var txEnvBytes []byte
-		var txid string
+	for range numItems {
 		txOffset := buf.GetBytesConsumed()
-		if txEnvBytes, err = buf.DecodeRawBytes(false); err != nil {
+		txEnvBytes, err := buf.DecodeRawBytes(false)
+		if err != nil {
 			return nil, nil, errors.Wrap(err, "error decoding the transaction envelope")
 		}
-		if txid, err = protoutil.GetOrComputeTxIDFromEnvelope(txEnvBytes); err != nil {
-			logger.Warningf("error while extracting txid from tx envelope bytes during deserialization of block. Ignoring this error as this is caused by a malformed transaction. Error:%s",
-				err)
-		}
 		data.Data = append(data.Data, txEnvBytes)
-		idxInfo := &txindexInfo{txID: txid, loc: &locPointer{txOffset, buf.GetBytesConsumed() - txOffset}}
-		txOffsets = append(txOffsets, idxInfo)
+		if !needs.txOffsets {
+			continue
+		}
+
+		var txid string
+		if needs.txIDs {
+			if txid, err = protoutil.GetOrComputeTxIDFromEnvelope(txEnvBytes); err != nil {
+				logger.Warningf("error while extracting txid from tx envelope bytes during "+
+					"deserialization of block. Ignoring this error as this is caused by a "+
+					"malformed transaction. Error:%s", err)
+			}
+		}
+		txOffsets = append(txOffsets, &txindexInfo{
+			txID: txid,
+			loc:  &locPointer{txOffset, buf.GetBytesConsumed() - txOffset},
+		})
 	}
 	return data, txOffsets, nil
 }
